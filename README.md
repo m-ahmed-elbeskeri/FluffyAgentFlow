@@ -1,8 +1,365 @@
-# 🐾 Fluffy Agent Flow
+# 🤖 Agent Framework: Simple Yet Powerful Workflow Orchestration
 
-Build complex workflows with the simplicity of writing Python functions! Fluffy Agent Flow makes orchestration easy, intuitive, and powerful.
+Build complex workflows as easily as writing Python functions! Perfect for AI/ML pipelines, data processing, automation, and more.
 
-## ✨ Core Features
+## Why Use Agent Framework? 
+
+### 🎯 Perfect For:
+- **AI/ML Engineers**: Orchestrate LLM pipelines and ML workflows
+- **Data Engineers**: Build ETL and data processing flows
+- **Backend Developers**: Create robust service workflows
+- **Automation Engineers**: Design complex automation systems
+- **Researchers**: Coordinate experiments and analysis
+
+### 🌟 Key Benefits:
+- **Write Less Code**: Turn complex workflows into simple state functions
+- **No More Spaghetti Code**: Clean, organized workflow management
+- **Type Safety**: Catch errors before they happen
+- **Automatic Resource Management**: No manual resource tracking
+- **Built for Scale**: From simple scripts to production systems
+
+## 🎓 Learn by Example
+
+### Example 1: Text Processing Pipeline
+
+Perfect for: Processing documents, articles, or any text data
+
+```python
+from agent import Agent, Context, StateResult
+
+# Create agent
+agent = Agent("text_processor")
+
+async def clean_text(context: Context) -> StateResult:
+    text = "Hello   World!  "
+    
+    # Store processed text
+    cleaned = text.strip().replace("  ", " ")
+    context.set_state("cleaned_text", cleaned)
+    
+    return "analyze_text"
+
+async def analyze_text(context: Context) -> StateResult:
+    # Get text from previous state
+    text = context.get_state("cleaned_text")
+    
+    # Simple analysis
+    stats = {
+        "length": len(text),
+        "words": len(text.split()),
+        "has_punctuation": "!" in text
+    }
+    context.set_state("stats", stats)
+    
+    return "format_results"
+
+async def format_results(context: Context) -> StateResult:
+    stats = context.get_state("stats")
+    text = context.get_state("cleaned_text")
+    
+    # Format final results
+    result = {
+        "text": text,
+        "analysis": stats,
+        "timestamp": time.time()
+    }
+    context.set_state("final_result", result)
+    
+    return None  # End workflow
+
+# Add states
+agent.add_state("clean_text", clean_text)
+agent.add_state("analyze_text", analyze_text)
+agent.add_state("format_results", format_results)
+
+# Run it!
+await agent.run()
+```
+
+### Example 2: LLM Processing Pipeline
+
+Perfect for: Working with AI models and processing results
+
+```python
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class LLMResponse(TypedContextData):
+    text: str
+    confidence: float
+    tokens_used: int
+    model: str
+
+async def generate_text(context: Context) -> StateResult:
+    # Simulate LLM call
+    response = LLMResponse(
+        text="AI generated text here...",
+        confidence=0.95,
+        tokens_used=150,
+        model="gpt-4"
+    )
+    
+    context.set_typed("llm_response", response)
+    return ["check_quality", "extract_entities"]
+
+async def check_quality(context: Context) -> StateResult:
+    response = context.get_typed("llm_response", LLMResponse)
+    
+    if response.confidence < 0.9:
+        return "regenerate_text"
+    
+    return "await_processing"
+
+async def extract_entities(context: Context) -> StateResult:
+    response = context.get_typed("llm_response", LLMResponse)
+    # Process entities...
+    return "await_processing"
+
+# Add states and run
+agent = Agent("llm_processor")
+agent.add_state("generate_text", generate_text)
+agent.add_state("check_quality", check_quality)
+agent.add_state("extract_entities", extract_entities)
+await agent.run()
+```
+
+### Example 3: Data Processing Pipeline
+
+Perfect for: ETL jobs, data transformations, and analysis
+
+```python
+@dataclass
+class DataBatch(TypedContextData):
+    data: List[dict]
+    batch_id: str
+    timestamp: float
+
+async def load_data(context: Context) -> StateResult:
+    # Simulate data load
+    batch = DataBatch(
+        data=[{"id": 1, "value": "test"}],
+        batch_id="batch_001",
+        timestamp=time.time()
+    )
+    
+    context.set_typed("batch", batch)
+    return ["validate_data", "transform_data"]
+
+async def validate_data(context: Context) -> StateResult:
+    batch = context.get_typed("batch", DataBatch)
+    
+    # Validate each record
+    valid = all(
+        isinstance(record.get('id'), int)
+        for record in batch.data
+    )
+    
+    if not valid:
+        return "handle_error"
+        
+    context.set_state("validation_passed", True)
+    return "await_processing"
+
+# Add states with resource management
+agent = Agent("data_processor")
+agent.add_state(
+    "load_data", 
+    load_data,
+    resources=ResourceRequirements(
+        cpu_units=1.0,
+        memory_mb=512
+    )
+)
+```
+
+### Example 4: ML Training Pipeline
+
+Perfect for: Managing model training workflows
+
+```python
+@dataclass
+class TrainingConfig(TypedContextData):
+    model_name: str
+    batch_size: int
+    epochs: int
+    learning_rate: float
+
+@dataclass
+class TrainingMetrics(TypedContextData):
+    loss: float
+    accuracy: float
+    epoch: int
+
+async def prepare_training(context: Context) -> StateResult:
+    config = TrainingConfig(
+        model_name="my_model",
+        batch_size=32,
+        epochs=10,
+        learning_rate=0.001
+    )
+    
+    context.set_typed("config", config)
+    return "train_model"
+
+async def train_model(context: Context) -> StateResult:
+    config = context.get_typed("config", TrainingConfig)
+    
+    for epoch in range(config.epochs):
+        # Simulate training
+        metrics = TrainingMetrics(
+            loss=0.1,
+            accuracy=0.95,
+            epoch=epoch
+        )
+        context.set_typed(f"metrics_epoch_{epoch}", metrics)
+        
+        # Early stopping
+        if metrics.accuracy > 0.98:
+            return "evaluate_model"
+    
+    return "evaluate_model"
+```
+
+## 🎯 More Real-World Use Cases
+
+### Content Management System
+```python
+async def process_article(context: Context) -> StateResult:
+    # Process new article
+    article = context.get_typed("article", Article)
+    
+    # Run parallel processes
+    return [
+        "spell_check",
+        "generate_summary",
+        "extract_keywords",
+        "create_images"
+    ]
+
+async def spell_check(context: Context) -> StateResult:
+    # Check spelling
+    return "await_completion"
+
+async def generate_summary(context: Context) -> StateResult:
+    # Generate AI summary
+    return "await_completion"
+
+async def create_images(context: Context) -> StateResult:
+    # Generate images with DALL-E
+    return "await_completion"
+
+async def await_completion(context: Context) -> StateResult:
+    # Combine all results
+    return "publish"
+```
+
+### Customer Service Automation
+```python
+async def handle_ticket(context: Context) -> StateResult:
+    ticket = context.get_typed("ticket", ServiceTicket)
+    
+    # Analyze ticket priority
+    if ticket.priority == "high":
+        return "immediate_response"
+    elif "bug" in ticket.tags:
+        return "technical_review"
+    else:
+        return "standard_response"
+
+async def immediate_response(context: Context) -> StateResult:
+    # Generate quick response
+    response = await generate_priority_response()
+    context.set_state("response", response)
+    
+    return "human_review"
+```
+
+### Data Analysis Pipeline
+```python
+async def analyze_dataset(context: Context) -> StateResult:
+    dataset = context.get_typed("dataset", Dataset)
+    
+    # Split processing based on size
+    if len(dataset.data) > 10000:
+        chunks = split_data(dataset.data, 5)
+        for i, chunk in enumerate(chunks):
+            context.set_state(f"chunk_{i}", chunk)
+        return ["process_chunk_0", "process_chunk_1", "process_chunk_2"]
+    else:
+        return "simple_process"
+
+async def process_chunk(context: Context) -> StateResult:
+    # Process data chunk
+    chunk_id = context.get_state("chunk_id")
+    data = context.get_state(f"chunk_{chunk_id}")
+    
+    results = analyze_data(data)
+    context.set_state(f"results_{chunk_id}", results)
+    
+    return "merge_results"
+```
+
+## 🚀 Getting Started
+
+1. Install the framework:
+```bash
+pip install agent-framework
+```
+
+2. Create your first workflow:
+```python
+from agent import Agent, Context, StateResult
+
+# Create agent
+agent = Agent("my_first_workflow")
+
+# Define states
+async def first_step(context: Context) -> StateResult:
+    context.set_state("message", "Hello World!")
+    return "second_step"
+
+async def second_step(context: Context) -> StateResult:
+    msg = context.get_state("message")
+    print(f"Got message: {msg}")
+    return None
+
+# Add states and run
+agent.add_state("first_step", first_step)
+agent.add_state("second_step", second_step)
+await agent.run()
+```
+
+## 💡 Best Practices
+
+1. **Keep States Focused**
+   - Each state should do one thing well
+   - Use multiple states instead of complex functions
+
+2. **Use Type Safety**
+   - Define data classes for structured data
+   - Let the framework catch type errors early
+
+3. **Handle Errors Gracefully**
+   - Use retry policies for unreliable operations
+   - Add error states for proper fallback
+
+4. **Monitor Resources**
+   - Set appropriate resource requirements
+   - Use parallel processing wisely
+
+## 🌟 Join Our Community!
+
+- Share your workflows
+- Get help from experts
+- Contribute to the framework
+- Stay updated on new features
+
+## License
+
+MIT License - Free for personal and commercial use!
+
+## ✨ All Core Features
 
 ### 1. Smart Context System
 The context system lets you share data between states with type safety and automatic tracking.
