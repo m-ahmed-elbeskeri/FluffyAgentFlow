@@ -1,9 +1,14 @@
-🐾 Fluffy Agent Flow
+# 🐾 Fluffy Agent Flow
+
 Build complex workflows with the simplicity of writing Python functions! Fluffy Agent Flow makes orchestration easy, intuitive, and powerful.
-✨ Core Features
-1. Smart Context System
+
+## ✨ Core Features
+
+### 1. Smart Context System
 The context system lets you share data between states with type safety and automatic tracking.
-pythonCopyfrom fluffy_agent import Agent, Context, StateResult
+
+```python
+from fluffy_agent import Agent, Context, StateResult
 
 # Untyped - Simple and flexible
 async def store_data(context: Context) -> StateResult:
@@ -30,9 +35,13 @@ async def handle_user(context: Context) -> StateResult:
     # Type-safe updates
     context.update_typed("user", age=29)
     return "next_state"
-2. Flow Control
+```
+
+### 2. Flow Control
 Easily control your workflow with sequential and parallel execution.
-pythonCopy# Sequential Flow
+
+```python
+# Sequential Flow
 async def step1(context: Context) -> StateResult:
     context.set_state("data", "processed")
     return "step2"  # Go to step2
@@ -47,9 +56,13 @@ async def start_parallel(context: Context) -> StateResult:
 async def merge_results(context: Context) -> StateResult:
     # Automatically waits for both processes
     return None
-3. Resource Management
+```
+
+### 3. Resource Management
 Automatically manage and optimize resource usage.
-pythonCopyfrom fluffy_agent import ResourceRequirements, Priority
+
+```python
+from fluffy_agent import ResourceRequirements, Priority
 
 # Define resources needed
 requirements = ResourceRequirements(
@@ -65,9 +78,13 @@ agent.add_state(
     train_model,
     resources=requirements
 )
-4. Dependency Management
+```
+
+### 4. Dependency Management
 Define complex dependencies between states.
-pythonCopyfrom fluffy_agent import DependencyType, DependencyLifecycle
+
+```python
+from fluffy_agent import DependencyType, DependencyLifecycle
 
 agent.add_state(
     "final_step",
@@ -83,9 +100,13 @@ agent.add_state(
         "background_task": DependencyType.PARALLEL
     }
 )
-5. Error Handling & Retries
+```
+
+### 5. Error Handling & Retries
 Built-in error handling and retry mechanisms.
-pythonCopyfrom fluffy_agent import RetryPolicy
+
+```python
+from fluffy_agent import RetryPolicy
 
 # Configure retries
 retry_policy = RetryPolicy(
@@ -101,9 +122,13 @@ agent.add_state(
     make_api_call,
     retry_policy=retry_policy
 )
-6. Human-in-the-Loop Integration
+```
+
+### 6. Human-in-the-Loop Integration
 Easily integrate human feedback into your workflows.
-pythonCopyasync def review_content(context: Context) -> StateResult:
+
+```python
+async def review_content(context: Context) -> StateResult:
     content = context.get_state("content")
     
     feedback = await context.human_in_the_loop(
@@ -116,9 +141,13 @@ pythonCopyasync def review_content(context: Context) -> StateResult:
         return "publish"
     else:
         return "revise"
-7. Agent Execution Control
+```
+
+### 7. Agent Execution Control
 Control how your workflow runs with flexible execution options.
-pythonCopy# Basic execution
+
+```python
+# Basic execution
 await agent.run()
 
 # With timeout
@@ -139,9 +168,13 @@ await agent.resume()  # Resumes from pause
 
 # Cancel execution
 await agent.cancel_all()  # Cancels all running states
-8. Checkpointing & Recovery
+```
+
+### 8. Checkpointing & Recovery
 Save and restore workflow state at any point.
-pythonCopy# Create checkpoint
+
+```python
+# Create checkpoint
 checkpoint = agent.create_checkpoint()
 
 # Save checkpoint to file
@@ -167,9 +200,13 @@ checkpoint_data = {
     "completed_states": list(checkpoint.completed_states),
     "shared_state": checkpoint.shared_state
 }
-9. State Execution Lifecycle
+```
+
+### 9. State Execution Lifecycle
 Monitor and control state execution status.
-pythonCopyfrom fluffy_agent import AgentStatus, StateStatus
+
+```python
+from fluffy_agent import AgentStatus, StateStatus
 
 # Check agent status
 status = agent.status  # IDLE, RUNNING, PAUSED, COMPLETED, FAILED
@@ -199,9 +236,13 @@ async def monitored_state(context: Context) -> StateResult:
         # State moves to FAILED on error
         context.set_state("error", str(e))
         return "handle_error"
-10. Advanced Execution Patterns
-Conditional Execution
-pythonCopyasync def route_processing(context: Context) -> StateResult:
+```
+
+### 10. Advanced Execution Patterns
+
+#### Conditional Execution
+```python
+async def route_processing(context: Context) -> StateResult:
     data_size = len(context.get_state("data", []))
     
     if data_size > 1000:
@@ -213,8 +254,11 @@ pythonCopyasync def route_processing(context: Context) -> StateResult:
     else:
         # Run simple processing for small data
         return "simple_process"
-Dynamic State Generation
-pythonCopy# Dynamically add states based on data
+```
+
+#### Dynamic State Generation
+```python
+# Dynamically add states based on data
 data_chunks = split_data(large_data, chunk_size=1000)
 
 for i, chunk in enumerate(data_chunks):
@@ -229,8 +273,11 @@ for i, chunk in enumerate(data_chunks):
         process_chunk,
         resources=ResourceRequirements(cpu_units=1.0)
     )
-State Cleanup and Compensation
-pythonCopyasync def critical_operation(context: Context) -> StateResult:
+```
+
+#### State Cleanup and Compensation
+```python
+async def critical_operation(context: Context) -> StateResult:
     try:
         # Perform operation
         return "next_state"
@@ -248,8 +295,12 @@ async def cleanup_resources(context: Context) -> StateResult:
 # Add states with cleanup
 agent.add_state("critical_operation", critical_operation)
 agent.add_state("cleanup_resources", cleanup_resources)
-11. Complete Example with All Features
-pythonCopyfrom fluffy_agent import (
+```
+
+### 11. Complete Example with All Features
+
+```python
+from fluffy_agent import (
     Agent, Context, StateResult, 
     ResourceRequirements, Priority,
     DependencyType, RetryPolicy
@@ -375,10 +426,13 @@ except Exception:
     # Save checkpoint on error
     checkpoint = agent.create_checkpoint()
     save_checkpoint(checkpoint)
+```
 
-    🌟 Use Case Examples
-1. LLM Content Pipeline
-pythonCopy@dataclass
+## 🌟 Use Case Examples
+
+### 1. LLM Content Pipeline
+```python
+@dataclass
 class Article(TypedContextData):
     title: str
     content: str
@@ -404,8 +458,11 @@ async def check_quality(context: Context) -> StateResult:
 agent = Agent("content_generator")
 agent.add_state("generate_content", generate_content)
 agent.add_state("check_quality", check_quality)
-2. Data Processing Pipeline
-pythonCopy@dataclass
+```
+
+### 2. Data Processing Pipeline
+```python
+@dataclass
 class DataBatch(TypedContextData):
     records: List[dict]
     batch_id: str
@@ -425,8 +482,11 @@ async def process_chunk(context: Context) -> StateResult:
     data = context.get_state(f"chunk_{chunk_id}")
     # Process chunk...
     return "merge_results"
-3. ML Training Pipeline
-pythonCopy@dataclass
+```
+
+### 3. ML Training Pipeline
+```python
+@dataclass
 class TrainingConfig(TypedContextData):
     model_type: str
     batch_size: int
@@ -444,8 +504,11 @@ async def train_model(context: Context) -> StateResult:
             return "evaluate"
     
     return "evaluate"
-4. Customer Service Automation
-pythonCopy@dataclass
+```
+
+### 4. Customer Service Automation
+```python
+@dataclass
 class ServiceTicket(TypedContextData):
     id: str
     content: str
@@ -466,8 +529,12 @@ async def urgent_response(context: Context) -> StateResult:
     ticket = context.get_typed("ticket", ServiceTicket)
     # Generate urgent response...
     return "human_review"
-🚀 Quick Start
-pythonCopyfrom fluffy_agent import Agent, Context, StateResult
+```
+
+## 🚀 Quick Start
+
+```python
+from fluffy_agent import Agent, Context, StateResult
 
 # Create agent
 agent = Agent("my_workflow")
@@ -488,12 +555,26 @@ agent.add_state("format_data", format_data)
 
 # Run workflow
 await agent.run()
-💡 Key Benefits
+```
 
-🎯 Simple, function-based workflow definition
-🔒 Type safety with flexible data handling
-⚡ Automatic resource management
-🔄 Built-in parallel processing
-🛠️ Comprehensive error handling
-👥 Human-in-the-loop capabilities
-📊 Easy scaling from simple to complex workflows
+## 💡 Key Benefits
+
+- 🎯 Simple, function-based workflow definition
+- 🔒 Type safety with flexible data handling
+- ⚡ Automatic resource management
+- 🔄 Built-in parallel processing
+- 🛠️ Comprehensive error handling
+- 👥 Human-in-the-loop capabilities
+- 📊 Easy scaling from simple to complex workflows
+
+## 📦 Installation
+
+```bash
+pip install fluffy-agent-flow
+```
+
+## 📚 Learn More
+
+- Full documentation: [docs.fluffy-agent.dev](https://docs.fluffy-agent.dev)
+- Examples: [examples/](https://github.com/fluffy-agent/examples)
+- Community: [Discord](https://discord.gg/fluffy-agent)
