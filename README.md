@@ -1211,6 +1211,6 @@ MIT License - Free for personal and commercial use.
 
 ---
 
-Built with ❤️ by the Agent Framework Team
+Built with ❤️ by Mohamed Elbeskeri
 - Examples: [examples/](https://github.com/fluffy-agent/examples)
 - Community: [Discord](https://discord.gg/dCtExd)
