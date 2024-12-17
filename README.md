@@ -1213,4 +1213,3 @@ MIT License - Free for personal and commercial use.
 
 Built with ❤️ by Mohamed Elbeskeri
 - Examples: [TBA](https://github.com/fluffy-agent/examples)
-- Community: [Discord](https://discord.gg/dCtExd)
