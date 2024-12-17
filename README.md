@@ -723,6 +723,488 @@ async def process_chunk(context: Context) -> StateResult:
    - Set appropriate resource requirements
    - Use parallel processing wisely
 
+## 📊 Monitoring & Metrics
+
+Track, analyze, and optimize your workflows with comprehensive monitoring capabilities.
+
+### Real-Time Monitoring
+
+#### Basic Monitoring
+```python
+from agent import Agent
+from agent_monitor import agent_monitor, MetricType
+
+# Enable monitoring with decorator
+@agent_monitor(
+    metrics=MetricType.ALL,  # Track all metric types
+    realtime=True,          # Enable real-time updates
+    update_interval=1.0     # Update every second
+)
+async def run_workflow():
+    agent = Agent("monitored_workflow")
+    # Add states and run...
+    await agent.run()
+
+# Custom metrics callback
+async def handle_metrics(metrics: dict):
+    print(f"Current throughput: {metrics['throughput']['states_per_second']['avg']}")
+    print(f"Resource usage: {metrics['resources']['used_CPU']['current']}")
+
+# Run with metrics handling
+@agent_monitor(metrics_callback=handle_metrics)
+async def run_monitored():
+    await run_workflow()
+```
+
+#### Selective Metric Collection
+```python
+# Monitor specific metrics
+@agent_monitor(
+    metrics=(
+        MetricType.TIMING |      # Track execution times
+        MetricType.RESOURCES |   # Monitor resource usage
+        MetricType.THROUGHPUT    # Measure operations/second
+    ),
+    aggregate=True  # Get aggregated statistics
+)
+async def run_optimized():
+    agent = Agent("optimized_workflow")
+    # Add states and run...
+    await agent.run()
+```
+
+### Available Metrics
+
+1. **Timing Metrics**
+   - Total execution time
+   - State-level timing
+   - Dependency resolution timing
+
+2. **Resource Usage**
+   - CPU utilization
+   - Memory consumption
+   - I/O operations
+   - GPU usage (if applicable)
+
+3. **State Metrics**
+   - State transitions
+   - Success/failure rates
+   - Retry statistics
+
+4. **Throughput Analysis**
+   - States per second
+   - Queue processing rate
+   - Concurrent operations
+
+5. **Dependency Metrics**
+   - Resolution time
+   - Dependency chain length
+   - Blocking dependencies
+
+### Advanced Monitoring
+
+#### Custom Metric Aggregation
+```python
+from agent_monitor import MetricAggregation
+
+# Create custom metric handler
+class CustomMetrics:
+    def __init__(self):
+        self.metrics = defaultdict(MetricAggregation)
+    
+    async def handle_metrics(self, data: dict):
+        for category, metrics in data.items():
+            for name, values in metrics.items():
+                self.metrics[f"{category}_{name}"].add(values['avg'])
+                
+        # Calculate custom KPIs
+        throughput = self.metrics['throughput_states_per_second'].avg
+        cpu_usage = self.metrics['resources_used_CPU'].avg
+        efficiency = throughput / cpu_usage if cpu_usage > 0 else 0
+        print(f"Workflow efficiency: {efficiency:.2f}")
+
+# Use custom metrics handler
+metrics_handler = CustomMetrics()
+@agent_monitor(
+    metrics_callback=metrics_handler.handle_metrics,
+    realtime=True
+)
+async def run_with_custom_metrics():
+    # Run workflow...
+    pass
+```
+
+#### Performance Analysis
+```python
+# Detailed performance monitoring
+@agent_monitor(
+    metrics=(
+        MetricType.TIMING |
+        MetricType.THROUGHPUT |
+        MetricType.LATENCY
+    )
+)
+async def analyze_performance():
+    async def process_metrics(data: dict):
+        # Extract performance metrics
+        latency = data['timing']['total_execution']['p95']
+        throughput = data['throughput']['states_per_second']['avg']
+        
+        # Log performance data
+        logging.info(f"P95 Latency: {latency}ms")
+        logging.info(f"Avg Throughput: {throughput} states/sec")
+        
+        # Check performance thresholds
+        if latency > 1000:  # 1 second
+            logging.warning("High latency detected")
+        if throughput < 10:
+            logging.warning("Low throughput detected")
+    
+    agent = Agent("performance_workflow")
+    # Add states and run...
+    await agent.run()
+```
+
+### Best Practices
+
+1. **Resource Monitoring**
+   - Monitor resource usage in real-time
+   - Set alerts for resource thresholds
+   - Track resource efficiency metrics
+
+2. **Performance Optimization**
+   - Use metrics to identify bottlenecks
+   - Monitor state execution patterns
+   - Analyze dependency resolution times
+
+3. **Metric Collection**
+   - Choose relevant metric types
+   - Set appropriate update intervals
+   - Use aggregation for long-running workflows
+
+4. **Error Tracking**
+   - Monitor error rates and patterns
+   - Track retry statistics
+   - Analyze failure points
+
+### Visualization Integration
+
+#### Metrics Dashboard Example
+```python
+from agent_monitor import RealTimeMetrics
+
+# Create real-time metrics dashboard
+class MetricsDashboard:
+    def __init__(self):
+        self.rt_metrics = RealTimeMetrics(update_interval=1.0)
+        
+    async def update_dashboard(self, metrics: dict):
+        # Update dashboard with latest metrics
+        throughput = metrics['throughput']['states_per_second']['avg']
+        errors = metrics['errors']['count']['sum']
+        cpu_usage = metrics['resources']['used_CPU']['current']
+        
+        print("\033[2J\033[H")  # Clear screen
+        print("=== Workflow Dashboard ===")
+        print(f"Throughput: {throughput:.2f} states/sec")
+        print(f"Errors: {errors}")
+        print(f"CPU Usage: {cpu_usage:.1f}%")
+        
+    async def start(self):
+        self.rt_metrics.subscribe(self.update_dashboard)
+        self.rt_metrics.start()
+        
+    async def stop(self):
+        self.rt_metrics.stop()
+
+# Use dashboard in workflow
+dashboard = MetricsDashboard()
+@agent_monitor(
+    metrics_callback=dashboard.update_dashboard,
+    realtime=True
+)
+async def run_with_dashboard():
+    await dashboard.start()
+    try:
+        # Run workflow...
+        pass
+    finally:
+        await dashboard.stop()
+```
+
+## 🔄 Coordination & Control
+
+Scale your workflows with production-grade coordination primitives, rate limiting, and deadlock prevention.
+
+### Basic Coordination
+
+#### Create Coordinated Agent
+```python
+from agent import Agent
+from agent.coordination import create_coordinated_agent, PrimitiveType, RateLimitStrategy
+
+# Create agent with coordination enabled
+agent = create_coordinated_agent("coordinated_workflow")
+
+# Or enhance existing agent
+from agent.coordination import enhance_agent
+agent = enhance_agent(Agent("my_workflow"))
+```
+
+#### Rate Limiting
+```python
+# Add rate limit to specific state
+agent.add_state_rate_limit(
+    "api_call",
+    max_rate=10.0,          # 10 calls per second
+    strategy=RateLimitStrategy.TOKEN_BUCKET,
+    burst_size=5            # Allow bursts of 5 calls
+)
+
+# Add state with rate limiting
+async def api_call(context: Context) -> StateResult:
+    # Rate limiting handled automatically
+    return "next_state"
+
+agent.add_state("api_call", api_call)
+```
+
+### Coordination Primitives
+
+#### Mutex (Exclusive Access)
+```python
+# Add mutex for resource access
+agent.add_state_coordination(
+    "database_write",
+    PrimitiveType.MUTEX,
+    ttl=30.0  # Auto-release after 30 seconds
+)
+
+async def write_to_db(context: Context) -> StateResult:
+    # Mutex ensures exclusive access
+    data = context.get_state("data")
+    # Write data...
+    return "next_state"
+
+agent.add_state("database_write", write_to_db)
+```
+
+#### Semaphore (Concurrent Access)
+```python
+# Limit concurrent operations
+agent.add_state_coordination(
+    "heavy_process",
+    PrimitiveType.SEMAPHORE,
+    max_count=3  # Allow 3 concurrent executions
+)
+
+async def process_batch(context: Context) -> StateResult:
+    # Semaphore controls concurrency
+    return "next_state"
+
+agent.add_state("heavy_process", process_batch)
+```
+
+#### Resource Quotas
+```python
+# Add quota management
+agent.add_state_coordination(
+    "gpu_task",
+    PrimitiveType.QUOTA,
+    quota_limit=16.0,  # Total GPU memory limit
+    ttl=3600.0        # Reset quota hourly
+)
+
+async def train_model(context: Context) -> StateResult:
+    # Quota ensures resource availability
+    return "next_state"
+
+agent.add_state("gpu_task", train_model)
+```
+
+### Advanced Coordination
+
+#### Complex Rate Limiting
+```python
+from agent.coordination import RateLimitStrategy
+
+# Sliding window rate limit
+agent.add_state_rate_limit(
+    "api_call",
+    max_rate=100.0,
+    strategy=RateLimitStrategy.SLIDING_WINDOW,
+    window_size=60.0  # 1 minute window
+)
+
+# Leaky bucket for smooth flow
+agent.add_state_rate_limit(
+    "data_ingestion",
+    max_rate=50.0,
+    strategy=RateLimitStrategy.LEAKY_BUCKET,
+    window_size=1.0
+)
+```
+
+#### Barrier Synchronization
+```python
+# Create synchronization point
+agent.add_state_coordination(
+    "merge_results",
+    PrimitiveType.BARRIER,
+    max_count=5,        # Wait for 5 states
+    wait_timeout=30.0   # Timeout after 30 seconds
+)
+
+async def process_chunk(context: Context) -> StateResult:
+    # Process data chunk
+    return "merge_results"
+
+async def merge_results(context: Context) -> StateResult:
+    # Executes when all chunks complete
+    return "next_state"
+
+# Add parallel states
+for i in range(5):
+    agent.add_state(f"process_chunk_{i}", process_chunk)
+agent.add_state("merge_results", merge_results)
+```
+
+#### Lease Management
+```python
+# Time-based exclusive access
+agent.add_state_coordination(
+    "batch_process",
+    PrimitiveType.LEASE,
+    ttl=600.0  # 10 minute lease
+)
+
+async def process_batch(context: Context) -> StateResult:
+    # Lease ensures single execution
+    return "next_state"
+
+agent.add_state("batch_process", process_batch)
+```
+
+### Deadlock Prevention
+
+#### Automatic Detection
+```python
+# Configure deadlock detection
+agent._coordinator.deadlock_detector.detection_interval = 1.0
+agent._coordinator.deadlock_detector.max_cycles = 100
+
+# Get detection status
+status = await agent.get_coordination_status()
+if status["deadlock_detector"]["cycle_count"] > 0:
+    print("Deadlock detected!")
+```
+
+#### Resource Cleanup
+```python
+# Configure cleanup
+agent._coordinator.cleanup_interval = 60.0  # 1 minute
+
+# Manual cleanup
+async def cleanup_resources(context: Context) -> StateResult:
+    await agent.reset_coordination()
+    return "next_state"
+```
+
+### Coordination Monitoring
+
+#### Status Tracking
+```python
+async def monitor_coordination(context: Context) -> StateResult:
+    status = await agent.get_coordination_status()
+    
+    # Check primitive states
+    for name, state in status["primitives"].items():
+        print(f"Primitive {name}: {state['state']}")
+        print(f"Active owners: {len(state['owners'])}")
+        print(f"Wait count: {state['wait_count']}")
+    
+    # Check deadlock detector
+    detector = status["deadlock_detector"]
+    print(f"Detected cycles: {detector['cycle_count']}")
+    
+    return "next_state"
+```
+
+### Best Practices
+
+1. **Rate Limiting**
+   - Match rate limits to downstream capacity
+   - Use appropriate strategies for workload
+   - Set reasonable burst allowances
+
+2. **Resource Management**
+   - Set appropriate TTLs for primitives
+   - Use quotas for finite resources
+   - Monitor resource usage patterns
+
+3. **Deadlock Prevention**
+   - Enable automatic detection
+   - Set reasonable detection intervals
+   - Plan recovery strategies
+
+4. **Error Handling**
+   - Handle coordination timeouts
+   - Implement retry strategies
+   - Clean up resources properly
+
+5. **Performance**
+   - Use appropriate primitive types
+   - Monitor coordination overhead
+   - Balance safety vs. performance
+
+### Production Patterns
+
+#### Distributed Processing
+```python
+# Coordinate distributed workers
+agent.add_state_coordination(
+    "distributed_task",
+    PrimitiveType.SEMAPHORE,
+    max_count=10,
+    ttl=3600.0
+)
+
+agent.add_state_rate_limit(
+    "distributed_task",
+    max_rate=100.0,
+    strategy=RateLimitStrategy.SLIDING_WINDOW,
+    window_size=60.0
+)
+
+async def process_distributed(context: Context) -> StateResult:
+    # Coordinated processing across workers
+    chunk = context.get_state("chunk")
+    results = await process_chunk(chunk)
+    context.set_state(f"results_{chunk_id}", results)
+    return "merge_results"
+```
+
+#### Resource Pools
+```python
+# Manage shared resource pool
+agent.add_state_coordination(
+    "shared_resource",
+    PrimitiveType.QUOTA,
+    quota_limit=100.0,
+    ttl=60.0
+)
+
+async def use_resource(context: Context) -> StateResult:
+    # Get resource allocation
+    allocation = 10.0
+    async with ResourceAllocation("shared_resource", allocation):
+        # Use resource...
+        pass
+    return "next_state"
+```
+
+This coordination system provides robust control over workflow execution, resource usage, and concurrency, enabling safe and efficient operation at scale.
+
 ## 📄 License
 
 MIT License - Free for personal and commercial use.
