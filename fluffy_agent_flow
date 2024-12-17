@@ -1,0 +1,1192 @@
+"""
+Complete Agent Framework with scheduling, dependencies, resource management, and checkpointing.
+"""
+
+import asyncio
+from collections import defaultdict
+from enum import Enum, Flag, auto, IntEnum
+from typing import (
+    Callable, Dict, Optional, Union, List, Tuple, Set, Any,
+    TypeVar, Generic, Protocol, runtime_checkable,TypedDict
+)
+from dataclasses import dataclass, field, asdict, replace
+import contextlib
+import heapq
+import time
+import uuid
+from copy import deepcopy
+import random
+
+# Type definitions
+T = TypeVar('T')
+StateResult = Union[str, List[Union[str, Tuple["Agent", str]]], None]
+
+
+@runtime_checkable
+class StateFunction(Protocol):
+    async def __call__(self, context: "Context") -> StateResult: ...
+
+
+class Priority(IntEnum):
+    """Priority levels for state execution"""
+    LOW = 0
+    NORMAL = 1
+    HIGH = 2
+    CRITICAL = 3
+
+
+class AgentStatus(str, Enum):
+    """Agent execution status"""
+    IDLE = "idle"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class StateStatus(str, Enum):
+    """State execution status"""
+    PENDING = "pending"
+    READY = "ready"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+    TIMEOUT = "timeout"
+
+
+class DependencyType(Enum):
+    """Types of dependencies between states"""
+    REQUIRED = "required"  # Must complete before state can run
+    OPTIONAL = "optional"  # Will wait if running, otherwise skips
+    PARALLEL = "parallel"  # Can run in parallel with dependency
+    SEQUENTIAL = "sequential"  # Must run after dependency completes
+    CONDITIONAL = "conditional"  # Depends on condition function
+    TIMEOUT = "timeout"  # Wait for max time then continue
+    XOR = "xor"  # Only one dependency needs to be satisfied
+    AND = "and"  # All dependencies must be satisfied
+    OR = "or"  # At least one dependency must be satisfied
+
+
+class DependencyLifecycle(Enum):
+    """Lifecycle management for dependencies"""
+    ONCE = "once"  # Dependency only needs to be satisfied once
+    ALWAYS = "always"  # Dependency must be satisfied every time
+    SESSION = "session"  # Dependency valid for current run() execution
+    TEMPORARY = "temporary"  # Dependency expires after specified time
+    PERIODIC = "periodic"  # Must be re-satisfied after specified interval
+
+
+class ResourceType(Flag):
+    """Types of resources that can be managed"""
+    NONE = 0
+    CPU = auto()
+    MEMORY = auto()
+    IO = auto()
+    NETWORK = auto()
+    GPU = auto()
+    ALL = CPU | MEMORY | IO | NETWORK | GPU
+
+
+@dataclass
+class ResourceRequirements:
+    """Resource requirements for state execution"""
+    cpu_units: float = 1.0
+    memory_mb: float = 100.0
+    io_weight: float = 1.0
+    network_weight: float = 1.0
+    gpu_units: float = 0.0
+    priority: Priority = Priority.NORMAL
+    timeout: Optional[float] = None
+    resource_types: ResourceType = ResourceType.ALL
+
+
+@dataclass
+class DependencyConfig:
+    """Configuration for state dependencies"""
+    type: DependencyType
+    lifecycle: DependencyLifecycle = DependencyLifecycle.ALWAYS
+    condition: Optional[Callable[["Agent"], bool]] = None
+    expiry: Optional[float] = None
+    interval: Optional[float] = None
+    timeout: Optional[float] = None
+    retry_policy: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class StateMetadata:
+    """Metadata for state execution"""
+    status: StateStatus
+    attempts: int = 0
+    max_retries: int = 3
+    resources: ResourceRequirements = field(default_factory=ResourceRequirements)
+    dependencies: Dict[str, DependencyConfig] = field(default_factory=dict)
+    satisfied_dependencies: Set[str] = field(default_factory=set)
+    last_execution: Optional[float] = None
+    last_success: Optional[float] = None
+    state_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass(order=True)
+class PrioritizedState:
+    """State with priority for queue management"""
+    priority: int
+    timestamp: float
+    state_name: str = field(compare=False)
+    metadata: StateMetadata = field(compare=False)
+
+
+@dataclass
+class AgentCheckpoint:
+    """Checkpoint data for agent state"""
+    timestamp: float
+    agent_name: str
+    agent_status: AgentStatus
+    priority_queue: List[PrioritizedState]
+    state_metadata: Dict[str, StateMetadata]
+    running_states: Set[str]
+    completed_states: Set[str]
+    completed_once: Set[str]
+    shared_state: Dict[str, Any]
+    session_start: Optional[float]
+
+    @classmethod
+    def create_from_agent(cls, agent: "Agent") -> "AgentCheckpoint":
+        """Create checkpoint from agent instance"""
+        return cls(
+            timestamp=time.time(),
+            agent_name=agent.name,
+            agent_status=agent.status,
+            priority_queue=deepcopy(agent.priority_queue),
+            state_metadata=deepcopy(agent.state_metadata),
+            running_states=set(agent._running_states),
+            completed_states=set(agent.completed_states),
+            completed_once=set(agent.completed_once),
+            shared_state=deepcopy(agent.shared_state),
+            session_start=agent._session_start
+        )
+
+
+class RetryPolicy:
+    """Configurable retry policy for state execution"""
+    def __init__(
+        self,
+        max_retries: int = 3,
+        initial_delay: float = 1.0,
+        max_delay: float = 60.0,
+        exponential_base: float = 2.0,
+        jitter: bool = True
+    ):
+        self.max_retries = max_retries
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.exponential_base = exponential_base
+        self.jitter = jitter
+
+    async def wait(self, attempt: int) -> None:
+        if attempt >= self.max_retries:
+            return
+
+        delay = min(
+            self.initial_delay * (self.exponential_base ** attempt),
+            self.max_delay
+        )
+
+        if self.jitter:
+            delay *= (0.5 + random.random())
+
+        await asyncio.sleep(delay)
+
+@runtime_checkable
+class TypedContextData(Protocol):
+    """Protocol for type-safe context data"""
+    pass
+
+
+class StateType(Enum):
+    """Type of state data"""
+    ANY = "any"
+    TYPED = "typed"
+    UNTYPED = "untyped"
+
+class Context:
+    """Enhanced context with unified state management"""
+
+    def __init__(
+            self,
+            shared_state: Dict[str, Any],
+            cache_ttl: int = 300
+    ):
+        self.shared_state = shared_state
+        self._cache: Dict[str, Tuple[Any, float]] = {}
+        self.cache_ttl = cache_ttl
+        self._state_data: Dict[str, Any] = {}
+        self._typed_data: Dict[str, TypedContextData] = {}
+        self._protected_keys: Set[str] = set()
+
+    def get_state(self, key: str, default: Any = None) -> Any:
+        """Get regular untyped state data"""
+        if key in self._protected_keys:
+            raise KeyError(f"Cannot access typed data '{key}' through untyped interface")
+        return self._state_data.get(key, default)
+
+    def set_state(self, key: str, value: Any) -> None:
+        """Set regular untyped state data"""
+        if key in self._protected_keys:
+            raise KeyError(f"Cannot modify typed data '{key}' through untyped interface")
+        self._state_data[key] = value
+
+    def get_typed(self, key: str, expected_type: type) -> Optional[TypedContextData]:
+        """Get type-safe data with runtime type checking"""
+        value = self._typed_data.get(key)
+        if value is not None and isinstance(value, expected_type):
+            return value
+        return None
+
+    def set_typed(self, key: str, value: TypedContextData) -> None:
+        """Set type-safe data"""
+        if not isinstance(value, TypedContextData):
+            raise TypeError(f"Value must implement TypedContextData protocol")
+
+        self._state_data.pop(key, None)
+        self._protected_keys.add(key)
+        self._typed_data[key] = value
+
+    def update_typed(self, key: str, **updates) -> None:
+        """Update fields of existing typed data"""
+        if key not in self._typed_data:
+            raise KeyError(f"No typed data found for key: {key}")
+
+        current = self._typed_data[key]
+        for field, value in updates.items():
+            if hasattr(current, field):
+                setattr(current, field, value)
+            else:
+                raise AttributeError(f"Invalid field for {type(current).__name__}: {field}")
+
+    def remove_state(self, key: str, state_type: StateType = StateType.ANY) -> bool:
+        """
+        Remove state data of any type
+
+        Args:
+            key: The key to remove
+            state_type: Type of state to remove (ANY, TYPED, or UNTYPED)
+
+        Returns:
+            bool: True if state was removed, False if key not found
+        """
+        removed = False
+
+        if state_type in (StateType.ANY, StateType.TYPED):
+            if key in self._typed_data:
+                del self._typed_data[key]
+                self._protected_keys.discard(key)
+                removed = True
+
+        if state_type in (StateType.ANY, StateType.UNTYPED):
+            if key in self._state_data:
+                del self._state_data[key]
+                removed = True
+
+        return removed
+
+    def has_state(self, key: str, state_type: StateType = StateType.ANY) -> bool:
+        """
+        Check if state exists
+
+        Args:
+            key: The key to check
+            state_type: Type of state to check for
+
+        Returns:
+            bool: True if state exists of specified type
+        """
+        if state_type == StateType.ANY:
+            return key in self._typed_data or key in self._state_data
+        elif state_type == StateType.TYPED:
+            return key in self._typed_data
+        else:  # UNTYPED
+            return key in self._state_data and key not in self._protected_keys
+
+    def clear_state(self, state_type: StateType = StateType.ANY) -> None:
+        """
+        Clear state data
+
+        Args:
+            state_type: Type of state to clear (defaults to ALL)
+        """
+        if state_type in (StateType.ANY, StateType.TYPED):
+            self._typed_data.clear()
+            self._protected_keys.clear()
+
+        if state_type in (StateType.ANY, StateType.UNTYPED):
+            self._state_data.clear()
+
+    def get_keys(self, state_type: StateType = StateType.ANY) -> Set[str]:
+        """
+        Get all keys of specified type
+
+        Args:
+            state_type: Type of state keys to return
+
+        Returns:
+            Set of keys matching the specified state type
+        """
+        if state_type == StateType.ANY:
+            return set(self._typed_data.keys()) | set(self._state_data.keys())
+        elif state_type == StateType.TYPED:
+            return set(self._typed_data.keys())
+        else:  # UNTYPED
+            return set(k for k in self._state_data.keys() if k not in self._protected_keys)
+
+    async def human_in_the_loop(
+        self,
+        prompt: str,
+        timeout: Optional[float] = None,
+        default: Optional[str] = None,
+        validator: Optional[Callable[[str], bool]] = None
+    ) -> str:
+        while True:
+            if timeout:
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(None, input, prompt),
+                        timeout
+                    )
+                except asyncio.TimeoutError:
+                    return default if default is not None else ""
+            else:
+                response = input(prompt)
+
+            if validator is None or validator(response):
+                return response
+
+
+@dataclass
+class ResourceUsageStats:
+    """Statistics for resource usage"""
+    peak_usage: float = 0.0
+    current_usage: float = 0.0
+    total_allocations: int = 0
+    failed_allocations: int = 0
+    last_allocation_time: Optional[float] = None
+    total_wait_time: float = 0.0
+
+
+class ResourceAllocationError(Exception):
+    """Base class for resource allocation errors"""
+    pass
+
+
+class ResourceOverflowError(ResourceAllocationError):
+    """Raised when resource allocation would exceed limits"""
+    pass
+
+
+class ResourceQuotaExceededError(ResourceAllocationError):
+    """Raised when state/agent exceeds its resource quota"""
+    pass
+
+
+class ResourcePool:
+    """Advanced resource management system"""
+
+    def __init__(
+            self,
+            total_cpu: float = 4.0,
+            total_memory: float = 1024.0,
+            total_io: float = 100.0,
+            total_network: float = 100.0,
+            total_gpu: float = 0.0,
+            enable_preemption: bool = False,
+            enable_quotas: bool = False
+    ):
+        # Resource limits
+        self.resources = {
+            ResourceType.CPU: total_cpu,
+            ResourceType.MEMORY: total_memory,
+            ResourceType.IO: total_io,
+            ResourceType.NETWORK: total_network,
+            ResourceType.GPU: total_gpu
+        }
+
+        # Available resources
+        self.available = self.resources.copy()
+
+        # Core synchronization
+        self._global_lock = asyncio.Lock()
+        self._allocation_events: Dict[str, asyncio.Event] = {}
+
+        # Allocation tracking
+        self._allocations: Dict[str, Dict[ResourceType, float]] = {}
+        self._allocation_times: Dict[str, float] = {}
+        self._waiting_states: Set[str] = set()
+
+        # Usage statistics
+        self._usage_stats: Dict[ResourceType, ResourceUsageStats] = {
+            rt: ResourceUsageStats() for rt in ResourceType if rt != ResourceType.NONE
+        }
+
+        # Quotas (if enabled)
+        self._enable_quotas = enable_quotas
+        self._quotas: Dict[str, Dict[ResourceType, float]] = defaultdict(dict)
+
+        # Preemption (if enabled)
+        self._enable_preemption = enable_preemption
+        self._preempted_states: Set[str] = set()
+
+        # Historical tracking
+        self._usage_history: List[Tuple[float, Dict[ResourceType, float]]] = []
+        self._history_retention = 3600  # 1 hour
+
+    async def set_quota(self, state_name: str, resource_type: ResourceType, limit: float) -> None:
+        """Set resource quota for a state"""
+        if not self._enable_quotas:
+            raise RuntimeError("Quotas are not enabled")
+
+        async with self._global_lock:
+            self._quotas[state_name][resource_type] = limit
+
+    def _check_quota(self, state_name: str, requirements: ResourceRequirements) -> bool:
+        """Check if allocation would exceed quota"""
+        if not self._enable_quotas:
+            return True
+
+        current_usage = self._allocations.get(state_name, {})
+
+        for resource_type in ResourceType:
+            if resource_type == ResourceType.NONE:
+                continue
+
+            if resource_type not in requirements.resource_types:
+                continue
+
+            quota = self._quotas.get(state_name, {}).get(resource_type)
+            if quota is None:
+                continue
+
+            required = getattr(requirements, f"{resource_type.name.lower()}_units", 0.0)
+            current = current_usage.get(resource_type, 0.0)
+
+            if current + required > quota:
+                return False
+
+        return True
+
+    async def acquire(
+            self,
+            state_name: str,
+            requirements: ResourceRequirements,
+            timeout: Optional[float] = None,
+            allow_preemption: bool = False
+    ) -> bool:
+        """Acquire resources with advanced features"""
+        start_time = time.time()
+        self._waiting_states.add(state_name)
+
+        try:
+            async with asyncio.timeout(timeout) if timeout else contextlib.nullcontext():
+                while True:
+                    async with self._global_lock:
+                        # Validate requirements
+                        self._validate_requirements(requirements)
+
+                        # Check quotas
+                        if not self._check_quota(state_name, requirements):
+                            raise ResourceQuotaExceededError(
+                                f"Resource quota exceeded for state {state_name}"
+                            )
+
+                        # Try allocation
+                        if self._can_allocate(requirements):
+                            self._allocate(state_name, requirements)
+                            self._update_stats(state_name, requirements, start_time)
+                            return True
+
+                        # Handle preemption
+                        if (self._enable_preemption and allow_preemption and
+                                self._try_preemption(state_name, requirements)):
+                            continue
+
+                    # Wait for resources to become available
+                    if state_name not in self._allocation_events:
+                        self._allocation_events[state_name] = asyncio.Event()
+                    await self._allocation_events[state_name].wait()
+                    self._allocation_events[state_name].clear()
+
+        except asyncio.TimeoutError:
+            self._usage_stats[ResourceType.CPU].failed_allocations += 1
+            return False
+
+        finally:
+            self._waiting_states.discard(state_name)
+
+    def _validate_requirements(self, requirements: ResourceRequirements) -> None:
+        """Validate resource requirements"""
+        for resource_type in ResourceType:
+            if resource_type == ResourceType.NONE:
+                continue
+
+            if resource_type not in requirements.resource_types:
+                continue
+
+            required = getattr(requirements, f"{resource_type.name.lower()}_units", 0.0)
+
+            if required < 0:
+                raise ValueError(f"Negative resource requirement for {resource_type}")
+
+            if required > self.resources[resource_type]:
+                raise ResourceOverflowError(
+                    f"Resource requirement exceeds total available {resource_type}"
+                )
+
+    def _can_allocate(self, requirements: ResourceRequirements) -> bool:
+        """Check if resources can be allocated"""
+        for resource_type in ResourceType:
+            if resource_type == ResourceType.NONE:
+                continue
+
+            if resource_type not in requirements.resource_types:
+                continue
+
+            required = getattr(requirements, f"{resource_type.name.lower()}_units", 0.0)
+            if self.available[resource_type] < required:
+                return False
+        return True
+
+    def _allocate(self, state_name: str, requirements: ResourceRequirements) -> None:
+        """Allocate resources to a state"""
+        self._allocations[state_name] = {}
+        self._allocation_times[state_name] = time.time()
+
+        for resource_type in ResourceType:
+            if resource_type == ResourceType.NONE:
+                continue
+
+            if resource_type not in requirements.resource_types:
+                continue
+
+            required = getattr(requirements, f"{resource_type.name.lower()}_units", 0.0)
+            self.available[resource_type] -= required
+            self._allocations[state_name][resource_type] = required
+
+    def _try_preemption(self, state_name: str, requirements: ResourceRequirements) -> bool:
+        """Attempt to preempt lower priority states"""
+        if not self._enable_preemption:
+            return False
+
+        # Find potential states to preempt
+        candidates = []
+        for other_state, alloc in self._allocations.items():
+            if other_state == state_name:
+                continue
+
+            # Check if preempting would free enough resources
+            would_free = {rt: 0.0 for rt in ResourceType if rt != ResourceType.NONE}
+            for rt, amount in alloc.items():
+                would_free[rt] += amount
+
+            could_satisfy = True
+            for rt in requirements.resource_types:
+                if rt == ResourceType.NONE:
+                    continue
+
+                required = getattr(requirements, f"{rt.name.lower()}_units", 0.0)
+                if self.available[rt] + would_free[rt] < required:
+                    could_satisfy = False
+                    break
+
+            if could_satisfy:
+                candidates.append(other_state)
+
+        if not candidates:
+            return False
+
+        # Preempt states
+        for other_state in candidates:
+            self._preempt_state(other_state)
+
+        return True
+
+    def _preempt_state(self, state_name: str) -> None:
+        """Preempt a state and return its resources"""
+        if state_name not in self._allocations:
+            return
+
+        self._preempted_states.add(state_name)
+        for resource_type, amount in self._allocations[state_name].items():
+            self.available[resource_type] += amount
+
+        del self._allocations[state_name]
+        del self._allocation_times[state_name]
+
+    async def release(self, state_name: str) -> None:
+        """Release resources held by a state"""
+        async with self._global_lock:
+            if state_name not in self._allocations:
+                return
+
+            # Return resources
+            for resource_type, amount in self._allocations[state_name].items():
+                self.available[resource_type] += amount
+
+            # Clean up tracking
+            del self._allocations[state_name]
+            del self._allocation_times[state_name]
+
+            # Notify waiting states
+            for waiting_state in self._waiting_states:
+                if waiting_state in self._allocation_events:
+                    self._allocation_events[waiting_state].set()
+
+    def _update_stats(self, state_name: str, requirements: ResourceRequirements, start_time: float) -> None:
+        """Update usage statistics"""
+        wait_time = time.time() - start_time
+
+        for resource_type in ResourceType:
+            if resource_type == ResourceType.NONE:
+                continue
+
+            if resource_type not in requirements.resource_types:
+                continue
+
+            stats = self._usage_stats[resource_type]
+            current_usage = sum(
+                alloc.get(resource_type, 0.0) for alloc in self._allocations.values()
+            )
+
+            stats.current_usage = current_usage
+            stats.peak_usage = max(stats.peak_usage, current_usage)
+            stats.total_allocations += 1
+            stats.last_allocation_time = time.time()
+            stats.total_wait_time += wait_time
+
+        # Record historical data point
+        self._usage_history.append((time.time(), {
+            rt: self.available[rt] for rt in ResourceType if rt != ResourceType.NONE
+        }))
+
+        # Cleanup old history
+        cutoff = time.time() - self._history_retention
+        while self._usage_history and self._usage_history[0][0] < cutoff:
+            self._usage_history.pop(0)
+
+    def get_usage_stats(self) -> Dict[ResourceType, ResourceUsageStats]:
+        """Get current usage statistics"""
+        return self._usage_stats.copy()
+
+    def get_state_allocations(self) -> Dict[str, Dict[ResourceType, float]]:
+        """Get current resource allocations by state"""
+        return self._allocations.copy()
+
+    def get_waiting_states(self) -> Set[str]:
+        """Get states waiting for resources"""
+        return self._waiting_states.copy()
+
+    def get_preempted_states(self) -> Set[str]:
+        """Get states that were preempted"""
+        return self._preempted_states.copy()
+class Agent:
+    """Advanced agent with scheduling, dependencies, resources, and checkpointing"""
+
+    def __init__(
+            self,
+            name: str,
+            max_concurrent: int = 10,
+            state_timeout: Optional[float] = 60.0,
+            resource_pool: Optional[ResourcePool] = None,
+            retry_policy: Optional[RetryPolicy] = None
+    ):
+        self.name = name
+        self.states: Dict[str, StateFunction] = {}
+        self.state_metadata: Dict[str, StateMetadata] = {}
+        self.priority_queue: List[PrioritizedState] = []
+        self.shared_state: Dict[str, Any] = {}
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self.state_timeout = state_timeout
+        self.resource_pool = resource_pool or ResourcePool()
+        self.retry_policy = retry_policy or RetryPolicy()
+        self._state_events: Dict[str, asyncio.Event] = {}
+        self._running_states: Set[str] = set()
+        self._session_start: Optional[float] = None
+        self._cleanup_tasks: Set[asyncio.Task] = set()
+        self._executed_states: Set[str] = set()  # Add this
+
+        # Checkpoint and pause support
+        self.status = AgentStatus.IDLE
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()  # Initially not paused
+        self.completed_states: Set[str] = set()
+        self.completed_once: Set[str] = set()
+
+    def add_state(
+            self,
+            name: str,
+            func: StateFunction,
+            dependencies: Optional[Dict[str, Union[
+                DependencyType,
+                Tuple[DependencyType, DependencyLifecycle],
+                Tuple[DependencyType, DependencyLifecycle, Callable],
+                DependencyConfig
+            ]]] = None,
+            resources: Optional[ResourceRequirements] = None,
+            max_retries: int = 3,
+            retry_policy: Optional[RetryPolicy] = None
+    ) -> None:
+        """Add a state with enhanced configuration"""
+        self.states[name] = func
+        self._state_events[name] = asyncio.Event()
+
+        metadata = StateMetadata(
+            status=StateStatus.PENDING,
+            max_retries=max_retries,
+            resources=resources or ResourceRequirements()
+        )
+
+        if dependencies:
+            for dep_name, dep_config in dependencies.items():
+                if isinstance(dep_config, DependencyType):
+                    metadata.dependencies[dep_name] = DependencyConfig(
+                        type=dep_config
+                    )
+                elif isinstance(dep_config, tuple):
+                    if len(dep_config) == 2:
+                        dep_type, lifecycle = dep_config
+                        metadata.dependencies[dep_name] = DependencyConfig(
+                            type=dep_type,
+                            lifecycle=lifecycle
+                        )
+                    elif len(dep_config) == 3:
+                        dep_type, lifecycle, condition = dep_config
+                        metadata.dependencies[dep_name] = DependencyConfig(
+                            type=dep_type,
+                            lifecycle=lifecycle,
+                            condition=condition
+                        )
+                elif isinstance(dep_config, DependencyConfig):
+                    metadata.dependencies[dep_name] = dep_config
+
+        metadata.retry_policy = retry_policy or self.retry_policy
+        self.state_metadata[name] = metadata
+
+        if not dependencies:
+            self._add_to_queue(name, metadata)
+
+    def create_checkpoint(self) -> AgentCheckpoint:
+        """Create a checkpoint of current agent state"""
+        return AgentCheckpoint.create_from_agent(self)
+
+    async def restore_from_checkpoint(self, checkpoint: AgentCheckpoint) -> None:
+        """Restore agent state from checkpoint"""
+        if checkpoint.agent_name != self.name:
+            raise ValueError(f"Checkpoint is for agent '{checkpoint.agent_name}', not '{self.name}'")
+
+        self.status = checkpoint.agent_status
+        self.priority_queue = deepcopy(checkpoint.priority_queue)
+        self.state_metadata = deepcopy(checkpoint.state_metadata)
+        self._running_states = set(checkpoint.running_states)
+        self.completed_states = set(checkpoint.completed_states)
+        self.completed_once = set(checkpoint.completed_once)
+        self.shared_state = deepcopy(checkpoint.shared_state)
+        self._session_start = checkpoint.session_start
+
+        # Recreate events
+        self._state_events = {
+            name: asyncio.Event() for name in self.states
+        }
+        for state in self.completed_states:
+            self._state_events[state].set()
+
+        # Set pause event based on status
+        if self.status == AgentStatus.PAUSED:
+            self._pause_event.clear()
+        else:
+            self._pause_event.set()
+
+    async def pause(self) -> AgentCheckpoint:
+        """Pause agent execution and return checkpoint"""
+        if self.status == AgentStatus.RUNNING:
+            self.status = AgentStatus.PAUSED
+            self._pause_event.clear()
+            return self.create_checkpoint()
+        return None
+
+    async def resume(self) -> None:
+        """Resume agent execution"""
+        if self.status == AgentStatus.PAUSED:
+            self.status = AgentStatus.RUNNING
+            self._pause_event.set()
+
+    async def run(
+            self,
+            timeout: Optional[float] = None,
+            cleanup_timeout: Optional[float] = 10.0
+    ) -> None:
+        """Run the agent with pause support and enhanced cleanup"""
+        if not self._session_start:
+            self._session_start = time.time()
+
+        self.status = AgentStatus.RUNNING
+
+        try:
+            async with asyncio.timeout(timeout) if timeout else contextlib.nullcontext():
+                while self.priority_queue or self._running_states:
+                    # Check for pause
+                    await self._pause_event.wait()
+
+                    ready_states = await self._get_ready_states()
+
+                    if not ready_states:
+                        await asyncio.sleep(0.1)
+                        continue
+
+                    await asyncio.gather(*[
+                        self.run_state(state) for state in ready_states
+                    ])
+
+            self.status = AgentStatus.COMPLETED
+
+        except Exception as e:
+            self.status = AgentStatus.FAILED
+            raise
+
+        finally:
+            if self._cleanup_tasks:
+                try:
+                    async with asyncio.timeout(cleanup_timeout):
+                        await asyncio.gather(*self._cleanup_tasks)
+                except asyncio.TimeoutError:
+                    pass
+
+    async def _get_ready_states(self) -> List[str]:
+        """Get states ready for execution"""
+        ready_states = []
+
+        while (self.priority_queue and
+               len(ready_states) < self._semaphore._value):
+            state = heapq.heappop(self.priority_queue)
+
+            if await self._can_run(state.state_name):
+                ready_states.append(state.state_name)
+            else:
+                self._add_to_queue(
+                    state.state_name,
+                    state.metadata,
+                    priority_boost=-1
+                )
+
+        return ready_states
+
+    def _add_to_queue(
+            self,
+            state_name: str,
+            metadata: StateMetadata,
+            priority_boost: int = 0
+    ) -> None:
+        """Add state to priority queue with optional boost"""
+        if any(state.state_name == state_name for state in self.priority_queue):
+            return  # Prevent duplicate additions
+
+        heapq.heappush(
+            self.priority_queue,
+            PrioritizedState(
+                -(metadata.resources.priority + priority_boost),
+                time.time(),
+                state_name,
+                metadata
+            )
+        )
+
+    async def run_state(self, state_name: str) -> None:
+        """Run a state with pause support, error handling and resource management"""
+        if state_name in self._executed_states:
+            return
+
+        metadata = self.state_metadata[state_name]
+        metadata.status = StateStatus.RUNNING
+        self._running_states.add(state_name)
+        context = Context(self.shared_state)
+        start_time = time.time()
+
+        try:
+            # Check for pause before resource acquisition
+            await self._pause_event.wait()
+
+            if not await self.resource_pool.acquire(
+                    state_name,
+                    metadata.resources,
+                    timeout=metadata.resources.timeout
+            ):
+                self._add_to_queue(state_name, metadata)
+                return
+
+            async with self._semaphore:
+                while metadata.attempts < metadata.max_retries:
+                    # Check for pause before each attempt
+                    await self._pause_event.wait()
+                    metadata.attempts += 1
+
+                    try:
+                        async with asyncio.timeout(
+                                metadata.resources.timeout or self.state_timeout
+                        ):
+                            result = await self.states[state_name](context)
+
+                        metadata.status = StateStatus.COMPLETED
+                        metadata.last_execution = time.time()
+                        metadata.last_success = time.time()
+                        self._state_events[state_name].set()
+                        self.completed_states.add(state_name)
+
+                        await self._resolve_dependencies(state_name)
+
+                        if result:
+                            self._executed_states.add(state_name)
+                            if isinstance(result, list):
+                                transition_tasks = [
+                                    self._handle_transition(step)
+                                    for step in result
+                                ]
+                                await asyncio.gather(*transition_tasks)
+                            else:
+                                await self._handle_transition(result)
+                        break
+
+                    except asyncio.TimeoutError:
+                        metadata.status = StateStatus.TIMEOUT
+                        if metadata.attempts >= metadata.max_retries:
+                            raise
+                        await metadata.retry_policy.wait(metadata.attempts)
+
+                    except Exception as e:
+                        metadata.status = StateStatus.FAILED
+                        if metadata.attempts >= metadata.max_retries:
+                            raise
+                        await metadata.retry_policy.wait(metadata.attempts)
+
+        except Exception as e:
+            metadata.status = StateStatus.FAILED
+            cleanup_task = asyncio.create_task(
+                self._handle_failure(state_name, e)
+            )
+            self._cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(self._cleanup_tasks.discard)
+            raise
+
+        finally:
+            self._executed_states.add(state_name)
+            await self.resource_pool.release(state_name)
+            self._running_states.discard(state_name)
+            context.clear_state()
+
+            if (metadata.status == StateStatus.COMPLETED and
+                    any(d.lifecycle == DependencyLifecycle.PERIODIC
+                        for d in metadata.dependencies.values())):
+                self._schedule_periodic_execution(state_name, metadata)
+
+    async def _handle_failure(self, state_name: str, error: Exception) -> None:
+        """Handle state execution failures"""
+        metadata = self.state_metadata[state_name]
+
+        # Reset dependent states that require this state
+        for dep_name, dep_metadata in self.state_metadata.items():
+            for dep in dep_metadata.dependencies.values():
+                if (dep.type in {DependencyType.REQUIRED, DependencyType.SEQUENTIAL} and
+                        state_name in dep_metadata.dependencies):
+                    dep_metadata.status = StateStatus.PENDING
+                    dep_metadata.satisfied_dependencies.discard(state_name)
+
+        # Clear any cached results
+        self._state_events[state_name].clear()
+        self.completed_states.discard(state_name)
+
+        # Add compensation task to queue if defined
+        compensation_state = f"{state_name}_compensation"
+        if compensation_state in self.states:
+            self._add_to_queue(
+                compensation_state,
+                self.state_metadata[compensation_state],
+                priority_boost=1
+            )
+
+    def _schedule_periodic_execution(
+            self,
+            state_name: str,
+            metadata: StateMetadata
+    ) -> None:
+        """Schedule periodic re-execution of states"""
+        min_interval = float('inf')
+
+        # Find minimum interval from periodic dependencies
+        for dep in metadata.dependencies.values():
+            if (dep.lifecycle == DependencyLifecycle.PERIODIC and
+                    dep.interval is not None):
+                min_interval = min(min_interval, dep.interval)
+
+        if min_interval < float('inf'):
+            # Schedule re-execution after interval
+            self._add_to_queue(
+                state_name,
+                metadata,
+                priority_boost=-int(min_interval)  # Lower priority for periodic tasks
+            )
+
+    async def _handle_transition(
+            self,
+            next_step: Union[str, Tuple["Agent", str]]
+    ) -> None:
+        """Handle state transitions with validation"""
+        if isinstance(next_step, tuple):
+            next_agent, next_state = next_step
+            if not isinstance(next_agent, Agent) or not isinstance(next_state, str):
+                raise ValueError(f"Invalid transition format: {next_step}")
+
+            if next_state not in next_agent.states:
+                raise ValueError(
+                    f"Unknown state '{next_state}' in agent '{next_agent.name}'"
+                )
+
+            await next_agent.run_state(next_state)
+        else:
+            if next_step not in self.states:
+                raise ValueError(f"Unknown state: {next_step}")
+
+            self._add_to_queue(
+                next_step,
+                self.state_metadata[next_step]
+            )
+
+    async def _resolve_dependencies(self, state_name: str) -> None:
+        """Resolve dependencies with lifecycle management"""
+        current_time = time.time()
+        processed_deps = set()  # Track processed dependencies
+
+        for dependent_name, dependent_metadata in self.state_metadata.items():
+            for dep_name, dep_config in dependent_metadata.dependencies.items():
+                if dep_name != state_name:
+                    continue
+
+                # Handle different lifecycle types
+                if dep_config.lifecycle == DependencyLifecycle.TEMPORARY:
+                    if not dep_config.expiry:
+                        dep_config.expiry = current_time + (dep_config.timeout or 3600)
+
+                elif dep_config.lifecycle == DependencyLifecycle.PERIODIC:
+                    if dep_config.interval:
+                        dep_config.expiry = current_time + dep_config.interval
+
+                # Mark dependency as satisfied if appropriate
+                if dep_config.type in {
+                    DependencyType.REQUIRED,
+                    DependencyType.SEQUENTIAL
+                }:
+                    dependent_metadata.satisfied_dependencies.add(state_name)
+
+                    # Add to queue if ready to run
+                    if await self._can_run(dependent_name):
+                        self._add_to_queue(
+                            dependent_name,
+                            dependent_metadata
+                        )
+
+    async def _can_run(self, state_name: str) -> bool:
+        """Check if state can run with comprehensive dependency checking"""
+        metadata = self.state_metadata[state_name]
+        current_time = time.time()
+
+        if metadata.status in {StateStatus.RUNNING, StateStatus.FAILED}:
+            return False
+
+        satisfied_groups: Dict[str, Set[str]] = {}
+
+        for dep_name, dep_config in metadata.dependencies.items():
+            dep_metadata = self.state_metadata.get(dep_name)
+            if not dep_metadata:
+                continue
+
+            # Check if already satisfied based on lifecycle
+            if dep_name in metadata.satisfied_dependencies:
+                # Handle different lifecycle types
+                if dep_config.lifecycle == DependencyLifecycle.ONCE:
+                    continue
+
+                elif dep_config.lifecycle == DependencyLifecycle.SESSION:
+                    if (self._session_start and
+                            dep_metadata.last_execution >= self._session_start):
+                        continue
+
+                elif dep_config.lifecycle == DependencyLifecycle.TEMPORARY:
+                    if dep_config.expiry and current_time < dep_config.expiry:
+                        continue
+
+                elif dep_config.lifecycle == DependencyLifecycle.PERIODIC:
+                    if (dep_config.interval and
+                            dep_metadata.last_execution and
+                            current_time < dep_metadata.last_execution + dep_config.interval):
+                        continue
+
+            # Group dependencies by type for complex dependency logic
+            group_key = f"{dep_config.type}_{id(dep_config)}"
+            if group_key not in satisfied_groups:
+                satisfied_groups[group_key] = set()
+
+            # Check dependency conditions
+            is_satisfied = False
+
+            if dep_config.type == DependencyType.REQUIRED:
+                is_satisfied = dep_metadata.status == StateStatus.COMPLETED
+
+            elif dep_config.type == DependencyType.OPTIONAL:
+                is_satisfied = dep_name not in self._running_states
+
+            elif dep_config.type == DependencyType.PARALLEL:
+                is_satisfied = True  # Can always run in parallel
+
+            elif dep_config.type == DependencyType.CONDITIONAL:
+                is_satisfied = not dep_config.condition or dep_config.condition(self)
+
+            if is_satisfied:
+                satisfied_groups[group_key].add(dep_name)
+
+        # Check complex dependency relationships
+        for dep_name, dep_config in metadata.dependencies.items():
+            group_key = f"{dep_config.type}_{id(dep_config)}"
+            group = satisfied_groups[group_key]
+
+            if dep_config.type == DependencyType.XOR:
+                if len(group) != 1:
+                    metadata.status = StateStatus.BLOCKED
+                    return False
+
+            elif dep_config.type == DependencyType.AND:
+                if len(group) != len([
+                    d for d in metadata.dependencies.values()
+                    if f"{d.type}_{id(d)}" == group_key
+                ]):
+                    metadata.status = StateStatus.BLOCKED
+                    return False
+
+            elif dep_config.type == DependencyType.OR:
+                if not group:
+                    metadata.status = StateStatus.BLOCKED
+                    return False
+
+        metadata.status = StateStatus.READY
+        return True
+
+    def cancel_state(self, state_name: str) -> None:
+        """Cancel a pending or running state"""
+        if state_name in self.state_metadata:
+            metadata = self.state_metadata[state_name]
+            metadata.status = StateStatus.CANCELLED
+            self._running_states.discard(state_name)
+            self._state_events[state_name].set()
+
+    async def cancel_all(self) -> None:
+        """Cancel all pending and running states"""
+        for state_name in list(self._running_states):
+            self.cancel_state(state_name)
+
+        self.priority_queue.clear()
+        await asyncio.gather(*self._cleanup_tasks)
