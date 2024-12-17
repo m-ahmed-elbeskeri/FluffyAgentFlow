@@ -302,12 +302,7 @@ async def process_chunk(context: Context) -> StateResult:
 
 ## 🚀 Getting Started
 
-1. Install the framework:
-```bash
-pip install agent-framework
-```
-
-2. Create your first workflow:
+1. Create your first workflow:
 ```python
 from agent import Agent, Context, StateResult
 
