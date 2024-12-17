@@ -1,4 +1,4 @@
-# 🚀 Agent Framework: Powerful Workflow Orchestration Made Simple
+# 🚀 Fluffy Agent Flow: Powerful Workflow Orchestration Made Simple
 
 Build robust, scalable workflows as easily as writing Python functions. Perfect for AI/ML pipelines, data processing, and complex automation tasks.
 
