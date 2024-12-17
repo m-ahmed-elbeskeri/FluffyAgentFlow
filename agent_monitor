@@ -1,0 +1,264 @@
+from enum import Flag, auto
+from functools import wraps
+import logging
+from typing import Optional, Dict, Any, List, Set
+import time
+import traceback
+import json
+from collections import defaultdict
+import asyncio
+from dataclasses import dataclass, field
+import statistics
+
+
+class MetricType(Flag):
+    """Enhanced metric types for monitoring"""
+    NONE = 0
+    TIMING = auto()  # Execution timing and durations
+    RESOURCES = auto()  # Resource usage and allocation
+    DEPENDENCIES = auto()  # Dependency resolution and state
+    STATE_CHANGES = auto()  # State transitions and lifecycle
+    ERRORS = auto()  # Error tracking and handling
+    THROUGHPUT = auto()  # Operations per second
+    QUEUE_STATS = auto()  # Queue statistics
+    CONCURRENCY = auto()  # Concurrency levels
+    MEMORY = auto()  # Memory usage
+    PERIODIC = auto()  # Periodic task stats
+    RETRIES = auto()  # Retry statistics
+    LATENCY = auto()  # Operation latency
+    ALL = (TIMING | RESOURCES | DEPENDENCIES | STATE_CHANGES |
+           ERRORS | THROUGHPUT | QUEUE_STATS | CONCURRENCY |
+           MEMORY | PERIODIC | RETRIES | LATENCY)
+
+
+@dataclass
+class MetricAggregation:
+    """Aggregated metrics container"""
+    count: int = 0
+    sum: float = 0.0
+    min: float = float('inf')
+    max: float = float('-inf')
+    values: List[float] = field(default_factory=list)
+
+    def add(self, value: float) -> None:
+        self.count += 1
+        self.sum += value
+        self.min = min(self.min, value)
+        self.max = max(self.max, value)
+        self.values.append(value)
+
+    @property
+    def avg(self) -> float:
+        return self.sum / self.count if self.count > 0 else 0
+
+    @property
+    def median(self) -> float:
+        return statistics.median(self.values) if self.values else 0
+
+    @property
+    def percentile_95(self) -> float:
+        return statistics.quantiles(self.values, n=20)[-1] if len(self.values) >= 20 else self.max
+
+    def to_dict(self) -> dict:
+        return {
+            "count": self.count,
+            "min": self.min,
+            "max": self.max,
+            "avg": self.avg,
+            "median": self.median,
+            "p95": self.percentile_95
+        }
+
+
+class RealTimeMetrics:
+    """Real-time metric collection and broadcasting"""
+
+    def __init__(self, update_interval: float = 1.0):
+        self.metrics: Dict[str, Any] = defaultdict(lambda: defaultdict(MetricAggregation))
+        self.subscribers: Set[callable] = set()
+        self.update_interval = update_interval
+        self._update_task: Optional[asyncio.Task] = None
+
+    def subscribe(self, callback: callable) -> None:
+        """Subscribe to real-time metric updates"""
+        self.subscribers.add(callback)
+
+    def unsubscribe(self, callback: callable) -> None:
+        """Unsubscribe from real-time metric updates"""
+        self.subscribers.discard(callback)
+
+    async def _broadcast_updates(self) -> None:
+        """Broadcast metric updates to subscribers"""
+        while True:
+            metrics_snapshot = {
+                category: {
+                    metric: agg.to_dict()
+                    for metric, agg in metrics.items()
+                }
+                for category, metrics in self.metrics.items()
+            }
+
+            for subscriber in self.subscribers:
+                try:
+                    await subscriber(metrics_snapshot)
+                except Exception:
+                    pass
+
+            await asyncio.sleep(self.update_interval)
+
+    def start(self) -> None:
+        """Start real-time metric broadcasting"""
+        if not self._update_task:
+            self._update_task = asyncio.create_task(self._broadcast_updates())
+
+    def stop(self) -> None:
+        """Stop real-time metric broadcasting"""
+        if self._update_task:
+            self._update_task.cancel()
+            self._update_task = None
+
+
+def agent_monitor(
+        metrics: MetricType = MetricType.ALL,
+        log_level: int = logging.INFO,
+        metrics_callback: Optional[callable] = None,
+        realtime: bool = False,
+        update_interval: float = 1.0,
+        aggregate: bool = True
+):
+    """
+    Enhanced decorator for comprehensive agent monitoring
+    """
+
+    def decorator(coro):
+        @wraps(coro)
+        async def wrapper(*args, **kwargs):
+            agent = args[0] if len(args) > 0 else kwargs.get('agent')
+            if not agent:
+                return await coro(*args, **kwargs)
+
+            # Initialize monitoring
+            start_time = time.time()
+            rt_metrics = RealTimeMetrics(update_interval) if realtime else None
+            collected_metrics = defaultdict(lambda: defaultdict(MetricAggregation))
+
+            logger = logging.getLogger(f"Agent_{agent.name}")
+            logger.setLevel(log_level)
+
+            if realtime:
+                rt_metrics.start()
+                if metrics_callback:
+                    rt_metrics.subscribe(metrics_callback)
+
+            def update_metric(category: str, name: str, value: float) -> None:
+                """Update both real-time and collected metrics"""
+                collected_metrics[category][name].add(value)
+                if rt_metrics:
+                    rt_metrics.metrics[category][name].add(value)
+
+            # Enhanced metric collection methods
+            original_methods = {}
+
+            if MetricType.STATE_CHANGES in metrics:
+                original_methods['run_state'] = agent.run_state
+
+                async def monitored_run_state(state_name, *args, **kwargs):
+                    state_start = time.time()
+                    try:
+                        result = await original_methods['run_state'](state_name, *args, **kwargs)
+                        duration = time.time() - state_start
+                        update_metric("states", state_name, duration)
+                        update_metric("states", "total_execution", duration)
+                        return result
+                    except Exception as e:
+                        update_metric("errors", state_name, time.time() - state_start)
+                        raise
+
+                agent.run_state = monitored_run_state
+
+            if MetricType.QUEUE_STATS in metrics:
+                original_methods['_add_to_queue'] = agent._add_to_queue
+
+                def monitored_add_to_queue(state_name, metadata, priority_boost=0):
+                    queue_size = len(agent.priority_queue)
+                    update_metric("queue", "size", queue_size)
+                    update_metric("queue", "priority", priority_boost)
+                    return original_methods['_add_to_queue'](state_name, metadata, priority_boost)
+
+                agent._add_to_queue = monitored_add_to_queue
+
+            if MetricType.DEPENDENCIES in metrics:
+                original_methods['_resolve_dependencies'] = agent._resolve_dependencies
+
+                async def monitored_resolve_dependencies(state_name):
+                    start_time = time.time()
+                    try:
+                        result = await original_methods['_resolve_dependencies'](state_name)
+                        duration = time.time() - start_time
+                        update_metric("dependencies", f"resolve_{state_name}", duration)
+                        return result
+                    except Exception as e:
+                        update_metric("errors", f"dep_resolve_{state_name}", time.time() - start_time)
+                        raise
+
+                agent._resolve_dependencies = monitored_resolve_dependencies
+
+            try:
+                # Execute agent
+                logger.info(f"Starting agent execution: {agent.name}")
+                result = await coro(*args, **kwargs)
+
+                # Collect final metrics
+                execution_time = time.time() - start_time
+                update_metric("timing", "total_execution", execution_time)
+
+                if MetricType.RESOURCES in metrics:
+                    for rtype, available in agent.resource_pool.available.items():
+                        update_metric("resources", f"available_{rtype.name}", available)
+                        used = agent.resource_pool.resources[rtype] - available
+                        update_metric("resources", f"used_{rtype.name}", used)
+
+                if MetricType.CONCURRENCY in metrics:
+                    update_metric("concurrency", "max_concurrent", len(agent._running_states))
+
+                if MetricType.THROUGHPUT in metrics:
+                    states_per_second = len(agent.completed_states) / execution_time
+                    update_metric("throughput", "states_per_second", states_per_second)
+
+                logger.info(
+                    f"Agent execution completed in {execution_time * 1000:.2f}ms"
+                )
+
+                return result
+
+            except Exception as e:
+                if MetricType.ERRORS in metrics:
+                    update_metric("errors", "count", 1)
+                    update_metric("errors", str(e), 1)
+                logger.error(f"Agent execution failed: {e}")
+                raise
+
+            finally:
+                # Stop real-time updates
+                if rt_metrics:
+                    rt_metrics.stop()
+
+                # Restore original methods
+                for name, method in original_methods.items():
+                    setattr(agent, name, method)
+
+                # Format final metrics
+                final_metrics = {
+                    category: {
+                        metric: agg.to_dict() if aggregate else agg.values
+                        for metric, agg in metrics.items()
+                    }
+                    for category, metrics in collected_metrics.items()
+                }
+
+                if metrics_callback and not realtime:
+                    metrics_callback(final_metrics)
+
+        return wrapper
+
+    return decorator
