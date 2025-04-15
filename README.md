@@ -1211,5 +1211,5 @@ MIT License - Free for personal and commercial use.
 
 ---
 
-Built with ❤️ by Mohamed Elbeskeri
+Built with ❤️ by Mohamed Elbeskeri and Hammam Elshtewi.
 - Examples: [TBA](https://github.com/fluffy-agent/examples)
